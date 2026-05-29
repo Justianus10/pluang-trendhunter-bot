@@ -211,7 +211,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/saham NVDA — analisa 1 saham detail\n"
         "(ganti NVDA dengan ticker manapun di universe 20 saham)\n\n"
         "*Auto-notif harian:*\n"
-        "/subscribe — aktifkan notif /pocket otomatis jam 07:00 WIB\n"
+        "/subscribe — aktifkan notif /pocket otomatis jam 19:00 WIB (1.5 jam sebelum US market buka)\n"
         "/unsubscribe — matikan notif\n\n"
         "/help — bantuan\n\n"
         "_Data refresh setiap 15 menit. Sumber: Yahoo Finance._"
@@ -401,7 +401,8 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in SUBSCRIBED:
         await update.message.reply_text(
             "✅ Anda sudah berlangganan auto-notif.\n\n"
-            "Setiap pagi jam *07:00 WIB* bot akan kirim rekomendasi Pocket otomatis.\n\n"
+            "Setiap sore jam *19:00 WIB* bot akan kirim rekomendasi Pocket otomatis "
+            "(1.5 jam sebelum US market buka).\n\n"
             "Untuk berhenti: /unsubscribe",
             parse_mode="Markdown"
         )
@@ -411,11 +412,12 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_subscribers()
     await update.message.reply_text(
         "🔔 *BERLANGGANAN AKTIF!*\n\n"
-        "Setiap pagi jam *07:00 WIB* bot otomatis kirim:\n"
+        "Setiap sore jam *19:00 WIB* bot otomatis kirim:\n"
         "- Top 7 saham untuk Pocket\n"
         "- Alokasi % per saham\n"
         "- Status sinyal harian\n\n"
-        "Cocok untuk re-balance Pocket Pluang sebelum US market buka (20:30 WIB).\n\n"
+        "Timing pas: 1.5 jam sebelum US market buka (20:30 WIB), "
+        "Anda sempat review & siapkan order di Pluang.\n\n"
         "Untuk berhenti: /unsubscribe",
         parse_mode="Markdown"
     )
@@ -455,14 +457,14 @@ async def daily_pocket_notif(context: ContextTypes.DEFAULT_TYPE):
 
     if not candidates:
         msg = (
-            "🌅 *NOTIFIKASI PAGI*\n"
+            "🌆 *NOTIFIKASI PRE-MARKET US*\n"
             f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-            "Belum cukup kandidat Pocket hari ini.\n"
+            "Belum cukup kandidat Pocket malam ini.\n"
             "Tunggu sinyal berikutnya — cek /cek atau /watch untuk peluang."
         )
     else:
         total_score = sum(r["score"] for r in candidates)
-        msg = "🌅 *NOTIFIKASI PAGI — POCKET HARI INI*\n"
+        msg = "🌆 *NOTIFIKASI PRE-MARKET US — POCKET MALAM INI*\n"
         msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
         msg += "```\n"
         msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
@@ -471,7 +473,7 @@ async def daily_pocket_notif(context: ContextTypes.DEFAULT_TYPE):
             alloc = r["score"] / total_score * 100
             msg += f"{i:>2} {r['ticker']:5} {r['score']:>3} {alloc:>7.1f}%\n"
         msg += "```\n"
-        msg += "\n💼 Re-balance Pocket Pluang Anda sebelum US market buka (20:30 WIB).\n"
+        msg += "\n💼 US market buka jam 20:30 WIB — Anda masih punya 1.5 jam untuk siapkan order di Pluang.\n"
         msg += "\n_Chat /beli untuk detail SL/TP, /unsubscribe untuk berhenti notif._"
 
     failed = []
@@ -509,15 +511,15 @@ def main():
     app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
 
-    # Schedule daily Pocket notif at 07:00 WIB
+    # Schedule daily Pocket notif at 19:00 WIB (1.5 jam sebelum US market buka)
     job_queue = app.job_queue
     if job_queue is not None:
         job_queue.run_daily(
             daily_pocket_notif,
-            time=dt_time(hour=7, minute=0, tzinfo=WIB),
+            time=dt_time(hour=19, minute=0, tzinfo=WIB),
             name="daily_pocket"
         )
-        logger.info("Scheduled daily Pocket notif at 07:00 WIB")
+        logger.info("Scheduled daily Pocket notif at 19:00 WIB (pre-market US)")
     else:
         logger.warning("JobQueue not available — daily notif disabled")
 
