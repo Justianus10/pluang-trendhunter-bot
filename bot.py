@@ -127,12 +127,30 @@ TICKERS = [
     ("RBLX",  "T3"), ("BABA",  "T3"), ("AMC",   "T3"),
 ]
 
+# Universe Global Top 10 — best picks dari analisis 234 saham US, semua available di Pluang
+TICKERS_GLOBAL = [
+    ("KLAC", "GS"),  # GS = Global Semiconductor
+    ("AMAT", "GS"),
+    ("ASML", "GS"),
+    ("LRCX", "GS"),
+    ("QCOM", "GS"),
+    ("MU",   "GS"),
+    ("TGT",  "GD"),  # GD = Global Diversified
+    ("SPG",  "GD"),
+    ("MS",   "GD"),
+    ("NUE",  "GD"),
+]
+
+# Untuk /saham command — bisa pakai ticker dari kedua universe
+ALL_TICKERS = TICKERS + TICKERS_GLOBAL
+
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ===== CACHE =====
 _cache = {"data": None, "timestamp": None}
+_cache_global = {"data": None, "timestamp": None}
 CACHE_MINUTES = 15
 
 
@@ -259,24 +277,48 @@ async def get_analysis():
     return results
 
 
+async def get_analysis_global():
+    """Cached analysis untuk universe Global Top 10."""
+    now = datetime.now(WIB)
+    if (_cache_global["data"] is not None and _cache_global["timestamp"] is not None and
+        (now - _cache_global["timestamp"]).total_seconds() < CACHE_MINUTES * 60):
+        return _cache_global["data"]
+
+    logger.info("Fetching fresh global analysis...")
+    loop = asyncio.get_event_loop()
+    results = []
+    for sym, tier in TICKERS_GLOBAL:
+        r = await loop.run_in_executor(None, analyze_ticker, sym, tier)
+        if r:
+            results.append(r)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    _cache_global["data"] = results
+    _cache_global["timestamp"] = now
+    return results
+
+
 # ===== TELEGRAM HANDLERS =====
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👋 *Selamat datang di Pluang Trend Hunter Bot!*\n\n"
-        "Bot ini analisa 20 saham US dari basket Pluang untuk swing 1-2 minggu.\n\n"
-        "*Commands utama:*\n"
+        "Bot analisa saham US untuk swing 1-2 minggu.\n\n"
+        "📊 *PLUANG BASKET — 20 saham populer:*\n"
         "/cek — ranking 20 saham\n"
         "/beli — rekomendasi BELI (skor ≥75)\n"
-        "/watch — saham HOLD + trend UP\n"
-        "/jual — rekomendasi JUAL (skor ≤30)\n"
-        "/pocket — top 7 untuk Pocket Pluang + alokasi %\n\n"
-        "*Saham spesifik:*\n"
-        "/saham NVDA — analisa 1 saham detail (teknikal + sentiment berita)\n"
-        "/news NVDA — full berita 24 jam terakhir + skor sentiment\n"
-        "(ganti NVDA dengan ticker manapun di universe 20 saham)\n\n"
-        "*Auto-notif harian:*\n"
-        "/subscribe — aktifkan notif /pocket otomatis jam 19:00 WIB (1.5 jam sebelum US market buka)\n"
+        "/watch — HOLD + trend UP\n"
+        "/jual — rekomendasi JUAL\n"
+        "/pocket — top 7 + alokasi %\n\n"
+        "🌍 *GLOBAL TOP 10 — best picks dari 234 saham US:*\n"
+        "/global — ranking 10 saham global pilihan\n"
+        "/global\\_beli — rekomendasi BELI dari global\n"
+        "/global\\_pocket — alokasi Pocket dari global\n\n"
+        "🔍 *Saham spesifik (30 saham):*\n"
+        "/saham NVDA — analisa detail (teknikal + sentiment)\n"
+        "/news NVDA — berita 24 jam + skor sentiment\n\n"
+        "🔔 *Auto-notif harian:*\n"
+        "/subscribe — notif /pocket otomatis jam 19:00 WIB\n"
         "/unsubscribe — matikan notif\n\n"
         "/help — bantuan\n\n"
         "_Data refresh setiap 15 menit. Sumber: Yahoo Finance._"
@@ -397,15 +439,104 @@ async def cmd_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+async def cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ranking 10 saham Global Top Picks."""
+    await update.message.reply_text("⏳ Memproses 10 saham Global Top...")
+    results = await get_analysis_global()
+
+    emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+    msg = f"🌍 *GLOBAL TOP 10 — BEST PICKS*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg += "```\n"
+    msg += f"{'#':>2} {'TKR':5} {'SEK':3} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
+    msg += "-" * 33 + "\n"
+    for i, r in enumerate(results, 1):
+        sec = "Semi" if r["tier"] == "GS" else "Div "
+        msg += f"{i:>2} {r['ticker']:5} {sec:3} {r['score']:>3} {emoji[r['status']]}{r['status']:5} {r['chg_10d']:>+5.1f}%\n"
+    msg += "```\n"
+    msg += "\n_GS = Global Semiconductor | GD = Global Diversified_\n"
+    msg += "_Semua available di Pluang. Chat /global\\_pocket untuk alokasi._"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_global_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Rekomendasi BELI dari 10 saham Global."""
+    await update.message.reply_text("⏳ Cari rekomendasi BELI dari Global Top...")
+    results = await get_analysis_global()
+    buy = [r for r in results if r["status"] in ("BELI", "WATCH")]
+    if not buy:
+        await update.message.reply_text(
+            "🌍 *GLOBAL BELI*\n\nTidak ada sinyal BELI/WATCH hari ini.",
+            parse_mode="Markdown"
+        )
+        return
+
+    msg = f"🌍 *GLOBAL TOP — REKOMENDASI BELI*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    for i, r in enumerate(buy[:8], 1):
+        sec = "Semi" if r["tier"] == "GS" else "Diversifikasi"
+        msg += (
+            f"*{i}. {r['ticker']}* ({sec}) — Skor {r['score']} ⭐ {r['status']}\n"
+            f"   Entry: `${r['price']:.2f}`\n"
+            f"   SL:    `${r['sl']:.2f}` (-{(1-r['sl']/r['price'])*100:.1f}%)\n"
+            f"   TP1:   `${r['tp1']:.2f}` (+{(r['tp1']/r['price']-1)*100:.1f}%)\n"
+            f"   TP2:   `${r['tp2']:.2f}` (+{(r['tp2']/r['price']-1)*100:.1f}%)\n"
+            f"   RSI: {r['rsi']:.0f} | 10D: {r['chg_10d']:+.1f}%\n\n"
+        )
+    msg += "_Hold 1-2 minggu | Semua available di Pluang_"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_global_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Alokasi Pocket dari 10 saham Global Top dengan weighting Semi-Heavy."""
+    await update.message.reply_text("⏳ Generate Global Pocket allocation...")
+    results = await get_analysis_global()
+
+    # Fixed allocation berdasarkan ranking awal — semi-heavy strategy
+    # User bisa adjust di Pluang sesuai preferensi
+    FIXED_ALLOCATION = {
+        "KLAC": 15, "AMAT": 12, "ASML": 12, "LRCX": 10,
+        "QCOM": 6,  "MU":   5,
+        "TGT":  12, "SPG":  10, "MS":   10, "NUE":  8,
+    }
+
+    msg = f"💼 *GLOBAL POCKET — SEMI HEAVY (1-2 minggu)*\n"
+    msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg += "```\n"
+    msg += f"{'#':>2} {'TKR':5} {'SEK':4} {'ALOC':>5} {'STAT':5}\n"
+    msg += "-" * 28 + "\n"
+
+    # Sort by allocation desc
+    sorted_results = sorted(results, key=lambda r: FIXED_ALLOCATION.get(r["ticker"], 0), reverse=True)
+
+    for i, r in enumerate(sorted_results, 1):
+        alloc = FIXED_ALLOCATION.get(r["ticker"], 0)
+        sec = "Semi" if r["tier"] == "GS" else "Div"
+        msg += f"{i:>2} {r['ticker']:5} {sec:4} {alloc:>4}% {r['status']:5}\n"
+    msg += "```\n"
+    msg += "\n📊 *Komposisi:*\n"
+    msg += "  • 60% Semiconductor (AI boom narrative)\n"
+    msg += "  • 40% Diversifikasi (Retail/REIT/Finance/Materials)\n\n"
+    msg += "*Cara pakai di Pluang:*\n"
+    msg += "1. Pluang → Pocket → + Buat Pocket\n"
+    msg += "2. Nama: 'Trend Hunter Global'\n"
+    msg += "3. Pilih 10 saham di atas dengan alokasi %\n"
+    msg += "4. Set modal Pocket (saran: Rp 3-10jt awal)\n"
+    msg += "5. Re-balance tiap Senin pagi\n\n"
+    msg += "_⚠️ Set TradingView price alert di SL untuk tiap saham — Pluang tidak auto-SL._"
+
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
 async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Analisa 1 saham spesifik. Cara pakai: /saham NVDA"""
-    valid_tickers = {t[0]: t[1] for t in TICKERS}
+    valid_tickers = {t[0]: t[1] for t in ALL_TICKERS}
 
     if not context.args:
-        tickers_list = ", ".join(valid_tickers.keys())
+        basket = ", ".join(t[0] for t in TICKERS)
+        global_ = ", ".join(t[0] for t in TICKERS_GLOBAL)
         await update.message.reply_text(
             f"Cara pakai: `/saham NVDA`\n\n"
-            f"Saham yang tersedia (20 saham):\n{tickers_list}",
+            f"*Pluang Basket (20):*\n{basket}\n\n"
+            f"*Global Top 10:*\n{global_}",
             parse_mode="Markdown"
         )
         return
@@ -413,7 +544,7 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ticker = context.args[0].upper()
     if ticker not in valid_tickers:
         await update.message.reply_text(
-            f"❌ Saham *{ticker}* tidak ada di universe Pluang Top 20.\n\n"
+            f"❌ Saham *{ticker}* tidak ada di universe (20 Pluang + 10 Global).\n\n"
             f"Pakai salah satu dari:\n{', '.join(valid_tickers.keys())}",
             parse_mode="Markdown"
         )
@@ -590,11 +721,11 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Tampilkan full berita 24 jam untuk 1 saham. /news NVDA"""
-    valid_tickers = {t[0]: t[1] for t in TICKERS}
+    valid_tickers = {t[0]: t[1] for t in ALL_TICKERS}
     if not context.args:
         await update.message.reply_text(
             "Cara pakai: `/news NVDA`\n\n"
-            f"Saham tersedia: {', '.join(valid_tickers.keys())}",
+            f"Saham tersedia (30): {', '.join(valid_tickers.keys())}",
             parse_mode="Markdown"
         )
         return
@@ -747,6 +878,9 @@ def main():
     app.add_handler(CommandHandler("watch",       cmd_watch))
     app.add_handler(CommandHandler("jual",        cmd_jual))
     app.add_handler(CommandHandler("pocket",      cmd_pocket))
+    app.add_handler(CommandHandler("global",      cmd_global))
+    app.add_handler(CommandHandler("global_beli", cmd_global_beli))
+    app.add_handler(CommandHandler("global_pocket", cmd_global_pocket))
     app.add_handler(CommandHandler("saham",       cmd_saham))
     app.add_handler(CommandHandler("news",        cmd_news))
     app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
