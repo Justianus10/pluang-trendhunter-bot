@@ -14,8 +14,14 @@ Commands:
 
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import asyncio
+
+WIB = timezone(timedelta(hours=7))
+
+
+def now_wib():
+    return datetime.now(WIB)
 
 import yfinance as yf
 import pandas as pd
@@ -148,7 +154,7 @@ def analyze_ticker(symbol: str, tier: str):
 
 async def get_analysis():
     """Cached analysis — refresh setiap 15 menit."""
-    now = datetime.now()
+    now = datetime.now(WIB)
     if (_cache["data"] is not None and _cache["timestamp"] is not None and
         (now - _cache["timestamp"]).total_seconds() < CACHE_MINUTES * 60):
         return _cache["data"]
@@ -194,7 +200,7 @@ async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = await get_analysis()
 
     emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
-    msg = f"📊 *RANKING 20 SAHAM*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg = f"📊 *RANKING 20 SAHAM*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
     msg += "```\n"
     msg += f"{'#':>2} {'TKR':5} {'TR':2} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
     msg += "-" * 32 + "\n"
@@ -213,7 +219,7 @@ async def cmd_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                           parse_mode="Markdown")
         return
 
-    msg = f"🟢 *REKOMENDASI BELI HARI INI*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg = f"🟢 *REKOMENDASI BELI HARI INI*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
     for i, r in enumerate(buy[:7], 1):
         msg += (
             f"*{i}. {r['ticker']}* ({r['tier']}) — Skor {r['score']} ⭐\n"
@@ -235,7 +241,7 @@ async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🟡 *WATCH UP*\n\nTidak ada saham WATCH UP hari ini.", parse_mode="Markdown")
         return
 
-    msg = f"🟡 *WATCH UP — TREND NAIK*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n"
+    msg = f"🟡 *WATCH UP — TREND NAIK*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n"
     msg += "_Strategi: tunggu pullback ke EMA20 baru beli_\n\n"
     for i, r in enumerate(watch[:7], 1):
         msg += (
@@ -254,7 +260,7 @@ async def cmd_jual(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔴 *REKOMENDASI JUAL*\n\nTidak ada sinyal JUAL hari ini.", parse_mode="Markdown")
         return
 
-    msg = f"🔴 *REKOMENDASI JUAL HARI INI*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n"
+    msg = f"🔴 *REKOMENDASI JUAL HARI INI*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n"
     msg += "_Action: Exit posisi / Hindari entry baru_\n\n"
     for i, r in enumerate(sell, 1):
         msg += (
@@ -282,7 +288,7 @@ async def cmd_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total_score = sum(r["score"] for r in candidates)
 
     msg = f"💼 *POCKET RECOMMENDER — 1-2 MINGGU*\n"
-    msg += f"_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')} | Profil: Balanced (T1+T2)_\n\n"
+    msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')} | Profil: Balanced (T1+T2)_\n\n"
     msg += "```\n"
     msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
     msg += "-" * 24 + "\n"
