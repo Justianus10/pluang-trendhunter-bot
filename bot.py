@@ -665,4 +665,74 @@ async def daily_pocket_notif(context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "🌆 *NOTIFIKASI PRE-MARKET US*\n"
             f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-            "Belum cukup
+            "Belum cukup kandidat Pocket malam ini.\n"
+            "Tunggu sinyal berikutnya — cek /cek atau /watch untuk peluang."
+        )
+    else:
+        total_score = sum(r["score"] for r in candidates)
+        msg = "🌆 *NOTIFIKASI PRE-MARKET US — POCKET MALAM INI*\n"
+        msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+        msg += "```\n"
+        msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
+        msg += "-" * 24 + "\n"
+        for i, r in enumerate(candidates, 1):
+            alloc = r["score"] / total_score * 100
+            msg += f"{i:>2} {r['ticker']:5} {r['score']:>3} {alloc:>7.1f}%\n"
+        msg += "```\n"
+        msg += "\n💼 US market buka jam 20:30 WIB — Anda masih punya 1.5 jam untuk siapkan order di Pluang.\n"
+        msg += "\n_Chat /beli untuk detail SL/TP, /unsubscribe untuk berhenti notif._"
+
+    failed = []
+    for chat_id in list(SUBSCRIBED):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send to {chat_id}: {e}")
+            failed.append(chat_id)
+
+    # Clean up dead subscribers
+    for chat_id in failed:
+        SUBSCRIBED.discard(chat_id)
+    if failed:
+        save_subscribers()
+
+
+def main():
+    if BOT_TOKEN == "PASTE_TOKEN_HERE":
+        print("ERROR: Set BOT_TOKEN environment variable atau edit langsung di bot.py")
+        return
+
+    load_subscribers()
+    logger.info(f"Loaded {len(SUBSCRIBED)} subscribers from file")
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("help",        cmd_help))
+    app.add_handler(CommandHandler("cek",         cmd_cek))
+    app.add_handler(CommandHandler("beli",        cmd_beli))
+    app.add_handler(CommandHandler("watch",       cmd_watch))
+    app.add_handler(CommandHandler("jual",        cmd_jual))
+    app.add_handler(CommandHandler("pocket",      cmd_pocket))
+    app.add_handler(CommandHandler("saham",       cmd_saham))
+    app.add_handler(CommandHandler("news",        cmd_news))
+    app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+
+    # Schedule daily Pocket notif at 19:00 WIB (1.5 jam sebelum US market buka)
+    job_queue = app.job_queue
+    if job_queue is not None:
+        job_queue.run_daily(
+            daily_pocket_notif,
+            time=dt_time(hour=19, minute=0, tzinfo=WIB),
+            name="daily_pocket"
+        )
+        logger.info("Scheduled daily Pocket notif at 19:00 WIB (pre-market US)")
+    else:
+        logger.warning("JobQueue not available — daily notif disabled")
+
+    logger.info("Bot started. Press Ctrl+C to stop.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
