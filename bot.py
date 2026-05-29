@@ -1,0 +1,320 @@
+"""
+Pluang Trend Hunter — Telegram Bot
+Bot Telegram untuk dapat sinyal swing 1-2 minggu dari 20 saham US Pluang.
+
+Commands:
+  /start  — sambutan
+  /cek    — full ranking 20 saham (BELI/WATCH/HOLD/JUAL)
+  /beli   — hanya rekomendasi BELI (skor >=75)
+  /watch  — saham HOLD + trend UP (tunggu pullback)
+  /jual   — hanya rekomendasi JUAL (skor <=30)
+  /pocket — top 7 saham untuk Pocket Pluang dengan alokasi %
+  /help   — daftar commands
+"""
+
+import os
+import logging
+from datetime import datetime
+import asyncio
+
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ===== CONFIG =====
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "PASTE_TOKEN_HERE")
+
+TICKERS = [
+    ("NVDA",  "T1"), ("TSLA",  "T1"), ("PLTR",  "T1"), ("AMZN",  "T1"),
+    ("INTC",  "T1"), ("AAPL",  "T1"),
+    ("AVGO",  "T2"), ("META",  "T2"), ("GOOGL", "T2"), ("MSFT",  "T2"),
+    ("NFLX",  "T2"), ("CRWD",  "T2"), ("JPM",   "T2"),
+    ("NIO",   "T3"), ("XPEV",  "T3"), ("SNAP",  "T3"), ("HOOD",  "T3"),
+    ("RBLX",  "T3"), ("BABA",  "T3"), ("AMC",   "T3"),
+]
+
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                    level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ===== CACHE =====
+_cache = {"data": None, "timestamp": None}
+CACHE_MINUTES = 15
+
+
+def analyze_ticker(symbol: str, tier: str):
+    try:
+        df = yf.Ticker(symbol).history(period="6mo")
+        if df.empty or len(df) < 60:
+            return None
+
+        close = df["Close"]
+        vol   = df["Volume"]
+        high, low = df["High"], df["Low"]
+
+        ema20 = close.ewm(span=20, adjust=False).mean()
+        ema50 = close.ewm(span=50, adjust=False).mean()
+
+        delta = close.diff()
+        gain  = delta.clip(lower=0).rolling(14).mean()
+        loss  = (-delta.clip(upper=0)).rolling(14).mean()
+        rsi   = 100 - 100 / (1 + gain / loss)
+
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd  = ema12 - ema26
+        sig   = macd.ewm(span=9, adjust=False).mean()
+        hist  = macd - sig
+
+        tr = pd.concat([
+            high - low,
+            (high - close.shift()).abs(),
+            (low  - close.shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(14).mean()
+
+        vol_sma20 = vol.rolling(20).mean()
+
+        price  = close.iloc[-1]
+        e20    = ema20.iloc[-1]
+        e50    = ema50.iloc[-1]
+        rsi_v  = rsi.iloc[-1]
+        rsi_p  = rsi.iloc[-2]
+        hist_v = hist.iloc[-1]
+        hist_p = hist.iloc[-2]
+        atr_v  = atr.iloc[-1]
+        vol_v  = vol.iloc[-1]
+        vs_v   = vol_sma20.iloc[-1]
+
+        # Pine signal logic
+        trend_up    = e20 > e50
+        trend_dn    = e20 < e50
+        rsi_buy_x   = rsi_v > 50 and rsi_p <= 50
+        rsi_sell_x  = rsi_v < 50 and rsi_p >= 50
+        macd_buy_x  = hist_v > 0 and hist_p <= 0
+        macd_sell_x = hist_v < 0 and hist_p >= 0
+        vol_surge   = vol_v > vs_v * 1.2
+
+        pine_buy  = trend_up and rsi_buy_x  and macd_buy_x  and vol_surge
+        pine_sell = trend_dn and rsi_sell_x and macd_sell_x and vol_surge
+
+        # Scoring 0-100
+        trend_diff_pct = (e20 - e50) / price * 100
+        trend_score = max(0.0, min(40.0, 20.0 + trend_diff_pct * 5.0))
+
+        if 50 <= rsi_v <= 65:   rsi_score = 25.0
+        elif 45 <= rsi_v < 50:  rsi_score = 18.0
+        elif 65 < rsi_v <= 75:  rsi_score = 18.0
+        elif 35 <= rsi_v < 45:  rsi_score = 10.0
+        else:                    rsi_score = 5.0
+
+        if hist_v > 0 and hist_v > hist_p:    macd_score = 20.0
+        elif hist_v > 0:                       macd_score = 15.0
+        elif hist_v < 0 and hist_v > hist_p:  macd_score = 8.0
+        else:                                  macd_score = 0.0
+
+        vol_score = min(15.0, (vol_v / max(vs_v, 1.0)) * 7.5)
+
+        score = round(trend_score + rsi_score + macd_score + vol_score)
+
+        # Status
+        if pine_buy or score >= 75:
+            status = "BELI"
+        elif pine_sell or score <= 30:
+            status = "JUAL"
+        elif trend_up and 31 <= score <= 74:
+            status = "WATCH"
+        else:
+            status = "HOLD"
+
+        # 10-day price change
+        chg_10d = (price / close.iloc[-11] - 1) * 100 if len(close) >= 11 else 0
+
+        return {
+            "ticker": symbol, "tier": tier, "price": price, "score": score,
+            "status": status, "rsi": rsi_v, "atr": atr_v,
+            "sl": price - 2.0 * atr_v,
+            "tp1": price + 2.0 * atr_v,
+            "tp2": price + 4.0 * atr_v,
+            "trend": "UP" if trend_up else "DOWN",
+            "chg_10d": chg_10d,
+        }
+    except Exception as e:
+        logger.error(f"Error analyzing {symbol}: {e}")
+        return None
+
+
+async def get_analysis():
+    """Cached analysis — refresh setiap 15 menit."""
+    now = datetime.now()
+    if (_cache["data"] is not None and _cache["timestamp"] is not None and
+        (now - _cache["timestamp"]).total_seconds() < CACHE_MINUTES * 60):
+        return _cache["data"]
+
+    logger.info("Fetching fresh analysis for 20 stocks...")
+    loop = asyncio.get_event_loop()
+    results = []
+    for sym, tier in TICKERS:
+        r = await loop.run_in_executor(None, analyze_ticker, sym, tier)
+        if r:
+            results.append(r)
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    _cache["data"] = results
+    _cache["timestamp"] = now
+    return results
+
+
+# ===== TELEGRAM HANDLERS =====
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = (
+        "👋 *Selamat datang di Pluang Trend Hunter Bot!*\n\n"
+        "Bot ini analisa 20 saham US dari basket Pluang untuk swing 1-2 minggu.\n\n"
+        "*Commands:*\n"
+        "/cek — full ranking 20 saham\n"
+        "/beli — rekomendasi BELI (skor ≥75)\n"
+        "/watch — saham HOLD + trend UP (tunggu pullback)\n"
+        "/jual — rekomendasi JUAL (skor ≤30)\n"
+        "/pocket — top 7 untuk Pocket Pluang + alokasi %\n"
+        "/help — bantuan\n\n"
+        "_Data refresh setiap 15 menit. Sumber: Yahoo Finance._"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await cmd_start(update, context)
+
+
+async def cmd_cek(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Memproses 20 saham...")
+    results = await get_analysis()
+
+    emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+    msg = f"📊 *RANKING 20 SAHAM*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg += "```\n"
+    msg += f"{'#':>2} {'TKR':5} {'TR':2} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
+    msg += "-" * 32 + "\n"
+    for i, r in enumerate(results, 1):
+        msg += f"{i:>2} {r['ticker']:5} {r['tier']:2} {r['score']:>3} {emoji[r['status']]}{r['status']:5} {r['chg_10d']:>+5.1f}%\n"
+    msg += "```\n"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Cari rekomendasi BELI...")
+    results = await get_analysis()
+    buy = [r for r in results if r["status"] == "BELI"]
+    if not buy:
+        await update.message.reply_text("🟢 *REKOMENDASI BELI*\n\nTidak ada sinyal BELI hari ini.\nCek /watch untuk saham HOLD+UP (tunggu pullback).",
+                                          parse_mode="Markdown")
+        return
+
+    msg = f"🟢 *REKOMENDASI BELI HARI INI*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    for i, r in enumerate(buy[:7], 1):
+        msg += (
+            f"*{i}. {r['ticker']}* ({r['tier']}) — Skor {r['score']} ⭐\n"
+            f"   Entry: `${r['price']:.2f}`\n"
+            f"   SL:    `${r['sl']:.2f}` (-{(1-r['sl']/r['price'])*100:.1f}%)\n"
+            f"   TP1:   `${r['tp1']:.2f}` (+{(r['tp1']/r['price']-1)*100:.1f}%)\n"
+            f"   TP2:   `${r['tp2']:.2f}` (+{(r['tp2']/r['price']-1)*100:.1f}%)\n"
+            f"   RSI: {r['rsi']:.0f} | 10D: {r['chg_10d']:+.1f}%\n\n"
+        )
+    msg += "_Hold 1-2 minggu | R:R 1:2 di TP2_"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Cari saham WATCH UP...")
+    results = await get_analysis()
+    watch = [r for r in results if r["status"] == "WATCH"]
+    if not watch:
+        await update.message.reply_text("🟡 *WATCH UP*\n\nTidak ada saham WATCH UP hari ini.", parse_mode="Markdown")
+        return
+
+    msg = f"🟡 *WATCH UP — TREND NAIK*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n"
+    msg += "_Strategi: tunggu pullback ke EMA20 baru beli_\n\n"
+    for i, r in enumerate(watch[:7], 1):
+        msg += (
+            f"*{i}. {r['ticker']}* ({r['tier']}) — Skor {r['score']}\n"
+            f"   Harga: `${r['price']:.2f}` | RSI {r['rsi']:.0f}\n"
+            f"   10D: {r['chg_10d']:+.1f}%\n\n"
+        )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_jual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Cari rekomendasi JUAL...")
+    results = await get_analysis()
+    sell = [r for r in results if r["status"] == "JUAL"]
+    if not sell:
+        await update.message.reply_text("🔴 *REKOMENDASI JUAL*\n\nTidak ada sinyal JUAL hari ini.", parse_mode="Markdown")
+        return
+
+    msg = f"🔴 *REKOMENDASI JUAL HARI INI*\n_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')}_\n"
+    msg += "_Action: Exit posisi / Hindari entry baru_\n\n"
+    for i, r in enumerate(sell, 1):
+        msg += (
+            f"*{i}. {r['ticker']}* ({r['tier']}) — Skor {r['score']} ⚠\n"
+            f"   Harga: `${r['price']:.2f}`\n"
+            f"   10D: {r['chg_10d']:+.1f}% | RSI {r['rsi']:.0f}\n\n"
+        )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("⏳ Generate Pocket Recommender...")
+    results = await get_analysis()
+
+    # Filter: skor >=65 + trend UP + tier T1/T2 (balanced default)
+    candidates = [r for r in results
+                   if r["score"] >= 65 and r["trend"] == "UP" and r["tier"] in ("T1", "T2")]
+    candidates = candidates[:7]
+
+    if not candidates:
+        await update.message.reply_text("💼 *POCKET RECOMMENDER*\n\nBelum cukup kandidat hari ini.\nTunggu sinyal berikutnya.",
+                                          parse_mode="Markdown")
+        return
+
+    total_score = sum(r["score"] for r in candidates)
+
+    msg = f"💼 *POCKET RECOMMENDER — 1-2 MINGGU*\n"
+    msg += f"_{datetime.now().strftime('%Y-%m-%d %H:%M WIB')} | Profil: Balanced (T1+T2)_\n\n"
+    msg += "```\n"
+    msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
+    msg += "-" * 24 + "\n"
+    for i, r in enumerate(candidates, 1):
+        alloc = r["score"] / total_score * 100
+        msg += f"{i:>2} {r['ticker']:5} {r['score']:>3} {alloc:>7.1f}%\n"
+    msg += "```\n"
+    msg += "\n*Cara pakai di Pluang:*\n"
+    msg += "1. Buka Pluang → menu Pocket → + Buat Pocket\n"
+    msg += "2. Nama: 'Trend Hunter Mingguan'\n"
+    msg += "3. Pilih saham di atas sesuai alokasi\n"
+    msg += "4. Re-balance setiap Senin pagi"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+def main():
+    if BOT_TOKEN == "PASTE_TOKEN_HERE":
+        print("ERROR: Set BOT_TOKEN environment variable atau edit langsung di bot.py")
+        return
+
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("help",   cmd_help))
+    app.add_handler(CommandHandler("cek",    cmd_cek))
+    app.add_handler(CommandHandler("beli",   cmd_beli))
+    app.add_handler(CommandHandler("watch",  cmd_watch))
+    app.add_handler(CommandHandler("jual",   cmd_jual))
+    app.add_handler(CommandHandler("pocket", cmd_pocket))
+
+    logger.info("Bot started. Press Ctrl+C to stop.")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == "__main__":
+    main()
