@@ -470,6 +470,13 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tech_bearish = r["status"] == "JUAL"
     sent_bullish = sentiment["score"] >= 0.2
     sent_bearish = sentiment["score"] <= -0.2
+    sent_strong_bull = sentiment["score"] >= 0.5
+    sent_strong_bear = sentiment["score"] <= -0.5
+    sent_available = sentiment["label"] not in ("NO_DATA", "NO_RECENT", "ERROR")
+
+    # Extended move detection (chasing risk)
+    extended_up   = r["chg_10d"] >= 15
+    extended_down = r["chg_10d"] <= -15
 
     msg += "🎯 *Confluence Check:*\n"
     if tech_bullish and sent_bullish:
@@ -480,20 +487,68 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "  ⚠️ Teknikal bullish tapi Sentiment bearish → **HATI-HATI**, mungkin trap\n"
     elif tech_bearish and sent_bullish:
         msg += "  ⚠️ Teknikal bearish tapi Sentiment bullish → **CAMPUR**, skip atau cek manual\n"
-    elif sentiment["label"] in ("NO_DATA", "NO_RECENT", "ERROR"):
+    elif not sent_available:
         msg += "  ⚪ Sentiment tidak tersedia — pakai teknikal saja\n"
     else:
-        msg += "  ⚪ Mixed signal — risk moderate\n"
+        msg += "  ⚪ Sentiment netral — momentum belum konfirmasi\n"
 
+    # Extended move warning
+    if extended_up:
+        msg += f"  ⚠️ *EXTENDED:* Sudah pump +{r['chg_10d']:.1f}% dalam 10 hari → risk chasing tinggi\n"
+    elif extended_down:
+        msg += f"  ⚠️ *EXTENDED:* Sudah drop {r['chg_10d']:.1f}% dalam 10 hari → risk catching falling knife\n"
+
+    # Smart Action message — context-aware
     msg += "\n"
     if r["status"] == "BELI":
-        msg += "✅ *Action:* Entry sekarang. Pasang SL ketat. Risk 1-2% modal."
+        if extended_up and not sent_strong_bull:
+            msg += ("⚠️ *Action:* Skor BELI tapi sudah pump +" + f"{r['chg_10d']:.1f}%" +
+                    " dan sentiment tidak konfirmasi kuat. "
+                    "**TUNGGU PULLBACK** ke EMA20, atau entry dengan 50% position size saja.")
+        elif extended_up and sent_strong_bull:
+            msg += ("✅ *Action:* Entry boleh, tapi sudah extended. Pakai 70% position size, "
+                    "SL ketat dekat EMA20.")
+        elif tech_bullish and sent_bearish:
+            msg += ("⚠️ *Action:* Skor teknikal BELI tapi sentiment bearish — "
+                    "**SKIP** atau tunggu sentiment netral/positif.")
+        elif sent_available and not sent_bullish:
+            msg += ("⏸ *Action:* Skor BELI tapi sentiment belum konfirmasi. "
+                    "Entry dengan 70% position size, atau tunggu sentiment naik ≥+0.2.")
+        else:
+            msg += "✅ *Action:* Entry sekarang. Pasang SL ketat. Risk 1-2% modal."
+
     elif r["status"] == "WATCH":
-        msg += "⏸ *Action:* Trend uptrend, tapi entry kurang ideal. Tunggu pullback ke EMA20."
+        if extended_up:
+            msg += ("⏸ *Action:* WATCH tapi sudah pump +" + f"{r['chg_10d']:.1f}%" +
+                    ". **JANGAN FOMO** — tunggu pullback ke EMA20 baru entry.")
+        elif sent_bullish:
+            msg += ("✅ *Action:* WATCH + sentiment bullish = setup berkembang. "
+                    "Tunggu pullback ke EMA20 untuk entry optimal.")
+        elif sent_bearish:
+            msg += ("⚠️ *Action:* WATCH tapi sentiment bearish — "
+                    "trend bisa reverse. **SKIP** sampai sentiment netral.")
+        else:
+            msg += "⏸ *Action:* Trend uptrend, tapi entry kurang ideal. Tunggu pullback ke EMA20."
+
     elif r["status"] == "JUAL":
-        msg += "🚨 *Action:* Exit posisi yang ada. Hindari entry baru."
-    else:
-        msg += "⏸ *Action:* Netral. Hold posisi yang ada / tunggu setup berikutnya."
+        if extended_down and sent_strong_bear:
+            msg += ("🚨 *Action:* JUAL + sentiment sangat bearish + sudah drop besar. "
+                    "**EXIT SEGERA**, jangan tunggu bounce.")
+        elif extended_down:
+            msg += ("⚠️ *Action:* JUAL tapi sudah drop besar — mungkin akan bounce. "
+                    "Exit di rally kecil, atau tunggu reversal pattern.")
+        else:
+            msg += "🚨 *Action:* Exit posisi yang ada. Hindari entry baru."
+
+    else:  # HOLD
+        if sent_strong_bull:
+            msg += ("👀 *Action:* HOLD teknikal tapi sentiment SANGAT BULLISH — "
+                    "watch ketat, mungkin breakout sebentar lagi.")
+        elif sent_strong_bear:
+            msg += ("👀 *Action:* HOLD teknikal tapi sentiment SANGAT BEARISH — "
+                    "kalau punya posisi, siap-siap reduce.")
+        else:
+            msg += "⏸ *Action:* Netral. Hold posisi yang ada / tunggu setup berikutnya."
 
     msg += "\n\n_Hold target: 1-2 minggu | R:R 1:2 di TP2_"
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -610,74 +665,4 @@ async def daily_pocket_notif(context: ContextTypes.DEFAULT_TYPE):
         msg = (
             "🌆 *NOTIFIKASI PRE-MARKET US*\n"
             f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-            "Belum cukup kandidat Pocket malam ini.\n"
-            "Tunggu sinyal berikutnya — cek /cek atau /watch untuk peluang."
-        )
-    else:
-        total_score = sum(r["score"] for r in candidates)
-        msg = "🌆 *NOTIFIKASI PRE-MARKET US — POCKET MALAM INI*\n"
-        msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-        msg += "```\n"
-        msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
-        msg += "-" * 24 + "\n"
-        for i, r in enumerate(candidates, 1):
-            alloc = r["score"] / total_score * 100
-            msg += f"{i:>2} {r['ticker']:5} {r['score']:>3} {alloc:>7.1f}%\n"
-        msg += "```\n"
-        msg += "\n💼 US market buka jam 20:30 WIB — Anda masih punya 1.5 jam untuk siapkan order di Pluang.\n"
-        msg += "\n_Chat /beli untuk detail SL/TP, /unsubscribe untuk berhenti notif._"
-
-    failed = []
-    for chat_id in list(SUBSCRIBED):
-        try:
-            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Failed to send to {chat_id}: {e}")
-            failed.append(chat_id)
-
-    # Clean up dead subscribers
-    for chat_id in failed:
-        SUBSCRIBED.discard(chat_id)
-    if failed:
-        save_subscribers()
-
-
-def main():
-    if BOT_TOKEN == "PASTE_TOKEN_HERE":
-        print("ERROR: Set BOT_TOKEN environment variable atau edit langsung di bot.py")
-        return
-
-    load_subscribers()
-    logger.info(f"Loaded {len(SUBSCRIBED)} subscribers from file")
-
-    app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",       cmd_start))
-    app.add_handler(CommandHandler("help",        cmd_help))
-    app.add_handler(CommandHandler("cek",         cmd_cek))
-    app.add_handler(CommandHandler("beli",        cmd_beli))
-    app.add_handler(CommandHandler("watch",       cmd_watch))
-    app.add_handler(CommandHandler("jual",        cmd_jual))
-    app.add_handler(CommandHandler("pocket",      cmd_pocket))
-    app.add_handler(CommandHandler("saham",       cmd_saham))
-    app.add_handler(CommandHandler("news",        cmd_news))
-    app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
-    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
-
-    # Schedule daily Pocket notif at 19:00 WIB (1.5 jam sebelum US market buka)
-    job_queue = app.job_queue
-    if job_queue is not None:
-        job_queue.run_daily(
-            daily_pocket_notif,
-            time=dt_time(hour=19, minute=0, tzinfo=WIB),
-            name="daily_pocket"
-        )
-        logger.info("Scheduled daily Pocket notif at 19:00 WIB (pre-market US)")
-    else:
-        logger.warning("JobQueue not available — daily notif disabled")
-
-    logger.info("Bot started. Press Ctrl+C to stop.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
-if __name__ == "__main__":
-    main()
+            "Belum cukup
