@@ -534,6 +534,20 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if extended_down and sent_strong_bear:
             msg += ("🚨 *Action:* JUAL + sentiment sangat bearish + sudah drop besar. "
                     "**EXIT SEGERA**, jangan tunggu bounce.")
+        elif sent_bullish and r["rsi"] <= 40:
+            msg += ("⚡ *Action:* **POTENTIAL CONTRARIAN SETUP!** "
+                    "JUAL teknikal TAPI sentiment bullish + RSI oversold "
+                    f"({r['rsi']:.0f}). Pasar mungkin over-panik.\n\n"
+                    "❌ JANGAN entry sekarang (technical belum konfirmasi).\n"
+                    "👀 WATCH 3-5 hari ke depan:\n"
+                    "  • Tunggu RSI cross up ≥40\n"
+                    "  • + 1 bullish candle kuat\n"
+                    "  • + sentiment tetap ≥+0.2\n"
+                    "  Baru entry contrarian dengan SL ketat di low recent.")
+        elif sent_bullish:
+            msg += ("⚠️ *Action:* JUAL teknikal tapi sentiment bullish — "
+                    "**CAMPUR**. Skip entry, tapi tunggu reversal pattern. "
+                    "Watch ketat 3-5 hari.")
         elif extended_down:
             msg += ("⚠️ *Action:* JUAL tapi sudah drop besar — mungkin akan bounce. "
                     "Exit di rally kecil, atau tunggu reversal pattern.")
