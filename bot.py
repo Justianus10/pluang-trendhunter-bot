@@ -305,13 +305,18 @@ async def get_analysis_global():
 
 # ===== KEYBOARD MENU =====
 
+# State tracking — chat_id → "main" / "saham" / "news"
+_user_state = {}
+
+
 def main_menu():
-    """Reply keyboard dengan tombol-tombol command. Tap = kirim command."""
+    """Main menu — Reply keyboard dengan tombol-tombol command utama."""
     keyboard = [
         ["⭐ Top 5 Picks", "🌍 Global 10"],
         ["💰 Global BELI", "💼 Global Pocket"],
         ["📊 Pluang Ranking", "💼 Pluang Pocket"],
         ["🟢 BELI", "🟡 WATCH", "🔴 JUAL"],
+        ["🔍 Analisa Saham", "📰 Berita Saham"],
         ["🔔 Subscribe", "🔕 Unsubscribe"],
         ["ℹ️ Help"],
     ]
@@ -319,14 +324,74 @@ def main_menu():
         keyboard,
         resize_keyboard=True,
         one_time_keyboard=False,
-        input_field_placeholder="Tap menu atau ketik /saham TICKER..."
+        input_field_placeholder="Tap menu untuk command..."
+    )
+
+
+def ticker_menu():
+    """Sub-menu untuk pilih ticker — 30 saham + Back."""
+    all_tickers = [t[0] for t in ALL_TICKERS]
+    keyboard = []
+    row = []
+    for tkr in all_tickers:
+        row.append(tkr)
+        if len(row) == 5:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append(["⬅️ Back to Menu"])
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Tap saham untuk pilih..."
     )
 
 
 # Mapping button text → command function
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle tap dari button menu — mapping ke command yang sesuai."""
+    """Handle tap dari button menu — main menu + ticker submenu."""
     text = update.message.text
+    chat_id = update.effective_chat.id
+    state = _user_state.get(chat_id, "main")
+
+    # === Back to main menu ===
+    if text == "⬅️ Back to Menu":
+        _user_state[chat_id] = "main"
+        await update.message.reply_text("📋 Kembali ke menu utama.", reply_markup=main_menu())
+        return
+
+    # === Switch to ticker submenu ===
+    if text == "🔍 Analisa Saham":
+        _user_state[chat_id] = "saham"
+        await update.message.reply_text(
+            "🔍 Pilih saham untuk analisa lengkap (teknikal + sentiment + confluence):",
+            reply_markup=ticker_menu()
+        )
+        return
+
+    if text == "📰 Berita Saham":
+        _user_state[chat_id] = "news"
+        await update.message.reply_text(
+            "📰 Pilih saham untuk lihat berita 24 jam terakhir:",
+            reply_markup=ticker_menu()
+        )
+        return
+
+    # === In ticker submenu — handle ticker selection ===
+    if state in ("saham", "news"):
+        ticker = text.upper().strip()
+        valid_tickers = {t[0]: t[1] for t in ALL_TICKERS}
+        if ticker in valid_tickers:
+            context.args = [ticker]
+            if state == "saham":
+                await cmd_saham(update, context)
+            else:
+                await cmd_news(update, context)
+            return
+
+    # === Main menu buttons ===
     button_map = {
         "⭐ Top 5 Picks":     cmd_global_top5,
         "🌍 Global 10":       cmd_global,
