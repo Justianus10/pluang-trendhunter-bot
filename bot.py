@@ -447,20 +447,32 @@ async def cmd_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ranking 10 saham Global Top Picks."""
     await update.message.reply_text("⏳ Memproses 10 saham Global Top...")
-    results = await get_analysis_global()
+    try:
+        results = await get_analysis_global()
+        if not results:
+            await update.message.reply_text("❌ Gagal fetch data. Coba lagi sebentar.")
+            return
 
-    emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
-    msg = f"🌍 *GLOBAL TOP 10 — BEST PICKS*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-    msg += "```\n"
-    msg += f"{'#':>2} {'TKR':5} {'SEK':3} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
-    msg += "-" * 33 + "\n"
-    for i, r in enumerate(results, 1):
-        sec = "Semi" if r["tier"] == "GS" else "Div "
-        msg += f"{i:>2} {r['ticker']:5} {sec:3} {r['score']:>3} {emoji[r['status']]}{r['status']:5} {r['chg_10d']:>+5.1f}%\n"
-    msg += "```\n"
-    msg += "\n_GS = Global Semiconductor | GD = Global Diversified_\n"
-    msg += "_Semua available di Pluang. Chat /global\\_pocket untuk alokasi._"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+        msg = f"🌍 GLOBAL TOP 10 — BEST PICKS\n{now_wib().strftime('%Y-%m-%d %H:%M WIB')}\n\n"
+        msg += "```\n"
+        msg += f"{'#':>2} {'TKR':5} {'SEK':4} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
+        msg += "-" * 34 + "\n"
+        for i, r in enumerate(results, 1):
+            sec = "Semi" if r["tier"] == "GS" else "Div"
+            stat = r.get("status", "?")
+            score = r.get("score", 0)
+            chg = r.get("chg_10d", 0)
+            em = emoji.get(stat, "⚪")
+            msg += f"{i:>2} {r['ticker']:5} {sec:4} {score:>3} {em}{stat:5} {chg:>+5.1f}%\n"
+        msg += "```\n\n"
+        msg += "GS = Global Semiconductor | GD = Global Diversified\n"
+        msg += "Semua available di Pluang.\n"
+        msg += "Chat /global_pocket untuk alokasi Pocket."
+        await update.message.reply_text(msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.exception("cmd_global error")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def cmd_global_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
