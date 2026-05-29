@@ -28,8 +28,72 @@ def now_wib():
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# Sentiment analyzer (singleton)
+_sentiment_analyzer = SentimentIntensityAnalyzer()
+
+
+def get_news_sentiment(ticker: str, hours: int = 24, max_news: int = 50):
+    """Fetch news headlines for ticker and score sentiment via VADER.
+    Returns dict: {score, label, count, headlines}
+    """
+    try:
+        tk = yf.Ticker(ticker)
+        news = getattr(tk, "news", None) or []
+        if not news:
+            return {"score": 0.0, "label": "NO_DATA", "count": 0, "headlines": []}
+
+        cutoff_ts = datetime.now().timestamp() - hours * 3600
+        scored = []
+        for item in news[:max_news]:
+            # yfinance news format varies — handle both old/new
+            ts = item.get("providerPublishTime") or item.get("pubDate") or 0
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    ts = 0
+            if ts and ts < cutoff_ts:
+                continue
+            title = item.get("title") or item.get("content", {}).get("title") if isinstance(item.get("content"), dict) else item.get("title", "")
+            if not title:
+                continue
+            publisher = item.get("publisher") or (item.get("content", {}).get("provider", {}).get("displayName", "?") if isinstance(item.get("content"), dict) else "?")
+            scores = _sentiment_analyzer.polarity_scores(title)
+            scored.append({
+                "title": title[:120],
+                "publisher": publisher,
+                "score": scores["compound"],
+                "ts": ts,
+            })
+
+        if not scored:
+            return {"score": 0.0, "label": "NO_RECENT", "count": 0, "headlines": []}
+
+        avg_score = sum(s["score"] for s in scored) / len(scored)
+
+        if avg_score >= 0.5:     label = "SANGAT BULLISH"
+        elif avg_score >= 0.2:   label = "BULLISH"
+        elif avg_score >= -0.2:  label = "NETRAL"
+        elif avg_score >= -0.5:  label = "BEARISH"
+        else:                     label = "SANGAT BEARISH"
+
+        # Top 3 most impactful (highest absolute score)
+        scored_sorted = sorted(scored, key=lambda x: abs(x["score"]), reverse=True)
+        top3 = scored_sorted[:3]
+
+        return {
+            "score": avg_score,
+            "label": label,
+            "count": len(scored),
+            "headlines": top3,
+        }
+    except Exception as e:
+        logger.error(f"News sentiment error for {ticker}: {e}")
+        return {"score": 0.0, "label": "ERROR", "count": 0, "headlines": []}
 
 # ===== SUBSCRIBERS — persist chat_id untuk auto-notif harian =====
 CHATS_FILE = Path("chats.json")
@@ -208,7 +272,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/jual — rekomendasi JUAL (skor ≤30)\n"
         "/pocket — top 7 untuk Pocket Pluang + alokasi %\n\n"
         "*Saham spesifik:*\n"
-        "/saham NVDA — analisa 1 saham detail\n"
+        "/saham NVDA — analisa 1 saham detail (teknikal + sentiment berita)\n"
+        "/news NVDA — full berita 24 jam terakhir + skor sentiment\n"
         "(ganti NVDA dengan ticker manapun di universe 20 saham)\n\n"
         "*Auto-notif harian:*\n"
         "/subscribe — aktifkan notif /pocket otomatis jam 19:00 WIB (1.5 jam sebelum US market buka)\n"
@@ -354,7 +419,7 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text(f"⏳ Menganalisa {ticker}...")
+    await update.message.reply_text(f"⏳ Menganalisa {ticker} + berita 24h...")
 
     loop = asyncio.get_event_loop()
     r = await loop.run_in_executor(None, analyze_ticker, ticker, valid_tickers[ticker])
@@ -363,6 +428,8 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Gagal fetch data {ticker}. Coba lagi nanti.")
         return
 
+    sentiment = await loop.run_in_executor(None, get_news_sentiment, ticker)
+
     emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
     sl_pct  = (r["sl"]  / r["price"] - 1) * 100
     tp1_pct = (r["tp1"] / r["price"] - 1) * 100
@@ -370,18 +437,55 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = f"{emoji[r['status']]} *ANALISA {r['ticker']}* (Tier {r['tier']})\n"
     msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-    msg += f"*Status:* {r['status']}  |  *Skor:* {r['score']}/100\n\n"
+    msg += f"*Status Teknikal:* {r['status']}  |  *Skor:* {r['score']}/100\n\n"
     msg += f"📊 *Data Teknikal:*\n"
     msg += f"  Harga: `${r['price']:.2f}`\n"
     msg += f"  RSI(14): {r['rsi']:.0f}\n"
     msg += f"  Trend EMA20 vs EMA50: {r['trend']}\n"
     msg += f"  Move 10 hari: {r['chg_10d']:+.1f}%\n\n"
+
+    # Sentiment block
+    sent_emoji = "🟢" if sentiment["score"] >= 0.2 else "🔴" if sentiment["score"] <= -0.2 else "⚪"
+    msg += f"📰 *Sentiment Berita 24h* {sent_emoji}\n"
+    if sentiment["label"] in ("NO_DATA", "NO_RECENT", "ERROR"):
+        msg += f"  _Tidak ada berita terkini_\n\n"
+    else:
+        msg += f"  Skor: `{sentiment['score']:+.2f}` ({sentiment['label']})\n"
+        msg += f"  Berita dianalisa: {sentiment['count']} artikel\n"
+        if sentiment["headlines"]:
+            msg += f"\n  *Headlines penting:*\n"
+            for h in sentiment["headlines"]:
+                tone = "✅" if h["score"] >= 0.2 else "⚠️" if h["score"] <= -0.2 else "▫️"
+                msg += f"  {tone} _{h['title'][:80]}_ (`{h['score']:+.2f}`)\n"
+        msg += "\n"
+
     msg += f"💰 *Level Trading (ATR-based):*\n"
     msg += f"  Entry: `${r['price']:.2f}`\n"
     msg += f"  SL:    `${r['sl']:.2f}` ({sl_pct:+.1f}%)\n"
     msg += f"  TP1:   `${r['tp1']:.2f}` ({tp1_pct:+.1f}%)\n"
     msg += f"  TP2:   `${r['tp2']:.2f}` ({tp2_pct:+.1f}%)\n\n"
 
+    # Confluence check
+    tech_bullish = r["status"] in ("BELI", "WATCH")
+    tech_bearish = r["status"] == "JUAL"
+    sent_bullish = sentiment["score"] >= 0.2
+    sent_bearish = sentiment["score"] <= -0.2
+
+    msg += "🎯 *Confluence Check:*\n"
+    if tech_bullish and sent_bullish:
+        msg += "  ✅ Teknikal + Sentiment **ALIGN BULLISH** → confidence TINGGI\n"
+    elif tech_bearish and sent_bearish:
+        msg += "  ✅ Teknikal + Sentiment **ALIGN BEARISH** → confidence TINGGI\n"
+    elif tech_bullish and sent_bearish:
+        msg += "  ⚠️ Teknikal bullish tapi Sentiment bearish → **HATI-HATI**, mungkin trap\n"
+    elif tech_bearish and sent_bullish:
+        msg += "  ⚠️ Teknikal bearish tapi Sentiment bullish → **CAMPUR**, skip atau cek manual\n"
+    elif sentiment["label"] in ("NO_DATA", "NO_RECENT", "ERROR"):
+        msg += "  ⚪ Sentiment tidak tersedia — pakai teknikal saja\n"
+    else:
+        msg += "  ⚪ Mixed signal — risk moderate\n"
+
+    msg += "\n"
     if r["status"] == "BELI":
         msg += "✅ *Action:* Entry sekarang. Pasang SL ketat. Risk 1-2% modal."
     elif r["status"] == "WATCH":
@@ -392,6 +496,53 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "⏸ *Action:* Netral. Hold posisi yang ada / tunggu setup berikutnya."
 
     msg += "\n\n_Hold target: 1-2 minggu | R:R 1:2 di TP2_"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tampilkan full berita 24 jam untuk 1 saham. /news NVDA"""
+    valid_tickers = {t[0]: t[1] for t in TICKERS}
+    if not context.args:
+        await update.message.reply_text(
+            "Cara pakai: `/news NVDA`\n\n"
+            f"Saham tersedia: {', '.join(valid_tickers.keys())}",
+            parse_mode="Markdown"
+        )
+        return
+
+    ticker = context.args[0].upper()
+    if ticker not in valid_tickers:
+        await update.message.reply_text(
+            f"❌ {ticker} tidak ada di universe.\n\nPakai: {', '.join(valid_tickers.keys())}",
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.message.reply_text(f"⏳ Fetch berita {ticker} 24 jam terakhir...")
+
+    loop = asyncio.get_event_loop()
+    sentiment = await loop.run_in_executor(None, get_news_sentiment, ticker, 24, 20)
+
+    if sentiment["label"] in ("NO_DATA", "NO_RECENT", "ERROR"):
+        await update.message.reply_text(
+            f"📰 *BERITA {ticker}*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+            "Tidak ada berita 24 jam terakhir.",
+            parse_mode="Markdown"
+        )
+        return
+
+    sent_emoji = "🟢" if sentiment["score"] >= 0.2 else "🔴" if sentiment["score"] <= -0.2 else "⚪"
+    msg = f"📰 *BERITA {ticker} — 24 Jam Terakhir*\n"
+    msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg += f"*Sentiment Agregat:* {sent_emoji} `{sentiment['score']:+.2f}` ({sentiment['label']})\n"
+    msg += f"*Total artikel:* {sentiment['count']}\n\n"
+    msg += "*Top headlines (impact tertinggi):*\n\n"
+
+    for i, h in enumerate(sentiment["headlines"], 1):
+        tone = "✅" if h["score"] >= 0.2 else "⚠️" if h["score"] <= -0.2 else "▫️"
+        msg += f"{i}. {tone} _{h['title']}_\n"
+        msg += f"   📊 Skor: `{h['score']:+.2f}` | Sumber: {h['publisher']}\n\n"
+
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
@@ -508,6 +659,7 @@ def main():
     app.add_handler(CommandHandler("jual",        cmd_jual))
     app.add_handler(CommandHandler("pocket",      cmd_pocket))
     app.add_handler(CommandHandler("saham",       cmd_saham))
+    app.add_handler(CommandHandler("news",        cmd_news))
     app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
 
