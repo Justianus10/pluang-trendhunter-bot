@@ -13,8 +13,10 @@ Commands:
 """
 
 import os
+import json
 import logging
-from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from datetime import datetime, timezone, timedelta, time as dt_time
 import asyncio
 
 WIB = timezone(timedelta(hours=7))
@@ -28,6 +30,26 @@ import pandas as pd
 import numpy as np
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
+# ===== SUBSCRIBERS — persist chat_id untuk auto-notif harian =====
+CHATS_FILE = Path("chats.json")
+SUBSCRIBED: set = set()
+
+
+def load_subscribers():
+    global SUBSCRIBED
+    if CHATS_FILE.exists():
+        try:
+            SUBSCRIBED = set(json.loads(CHATS_FILE.read_text()))
+        except Exception:
+            SUBSCRIBED = set()
+
+
+def save_subscribers():
+    try:
+        CHATS_FILE.write_text(json.dumps(list(SUBSCRIBED)))
+    except Exception as e:
+        logging.error(f"Failed to save subscribers: {e}")
 
 # ===== CONFIG =====
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "PASTE_TOKEN_HERE")
@@ -179,12 +201,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👋 *Selamat datang di Pluang Trend Hunter Bot!*\n\n"
         "Bot ini analisa 20 saham US dari basket Pluang untuk swing 1-2 minggu.\n\n"
-        "*Commands:*\n"
-        "/cek — full ranking 20 saham\n"
+        "*Commands utama:*\n"
+        "/cek — ranking 20 saham\n"
         "/beli — rekomendasi BELI (skor ≥75)\n"
-        "/watch — saham HOLD + trend UP (tunggu pullback)\n"
+        "/watch — saham HOLD + trend UP\n"
         "/jual — rekomendasi JUAL (skor ≤30)\n"
-        "/pocket — top 7 untuk Pocket Pluang + alokasi %\n"
+        "/pocket — top 7 untuk Pocket Pluang + alokasi %\n\n"
+        "*Saham spesifik:*\n"
+        "/saham NVDA — analisa 1 saham detail\n"
+        "(ganti NVDA dengan ticker manapun di universe 20 saham)\n\n"
+        "*Auto-notif harian:*\n"
+        "/subscribe — aktifkan notif /pocket otomatis jam 07:00 WIB\n"
+        "/unsubscribe — matikan notif\n\n"
         "/help — bantuan\n\n"
         "_Data refresh setiap 15 menit. Sumber: Yahoo Finance._"
     )
@@ -304,19 +332,194 @@ async def cmd_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
+async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Analisa 1 saham spesifik. Cara pakai: /saham NVDA"""
+    valid_tickers = {t[0]: t[1] for t in TICKERS}
+
+    if not context.args:
+        tickers_list = ", ".join(valid_tickers.keys())
+        await update.message.reply_text(
+            f"Cara pakai: `/saham NVDA`\n\n"
+            f"Saham yang tersedia (20 saham):\n{tickers_list}",
+            parse_mode="Markdown"
+        )
+        return
+
+    ticker = context.args[0].upper()
+    if ticker not in valid_tickers:
+        await update.message.reply_text(
+            f"❌ Saham *{ticker}* tidak ada di universe Pluang Top 20.\n\n"
+            f"Pakai salah satu dari:\n{', '.join(valid_tickers.keys())}",
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.message.reply_text(f"⏳ Menganalisa {ticker}...")
+
+    loop = asyncio.get_event_loop()
+    r = await loop.run_in_executor(None, analyze_ticker, ticker, valid_tickers[ticker])
+
+    if r is None:
+        await update.message.reply_text(f"❌ Gagal fetch data {ticker}. Coba lagi nanti.")
+        return
+
+    emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+    sl_pct  = (r["sl"]  / r["price"] - 1) * 100
+    tp1_pct = (r["tp1"] / r["price"] - 1) * 100
+    tp2_pct = (r["tp2"] / r["price"] - 1) * 100
+
+    msg = f"{emoji[r['status']]} *ANALISA {r['ticker']}* (Tier {r['tier']})\n"
+    msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+    msg += f"*Status:* {r['status']}  |  *Skor:* {r['score']}/100\n\n"
+    msg += f"📊 *Data Teknikal:*\n"
+    msg += f"  Harga: `${r['price']:.2f}`\n"
+    msg += f"  RSI(14): {r['rsi']:.0f}\n"
+    msg += f"  Trend EMA20 vs EMA50: {r['trend']}\n"
+    msg += f"  Move 10 hari: {r['chg_10d']:+.1f}%\n\n"
+    msg += f"💰 *Level Trading (ATR-based):*\n"
+    msg += f"  Entry: `${r['price']:.2f}`\n"
+    msg += f"  SL:    `${r['sl']:.2f}` ({sl_pct:+.1f}%)\n"
+    msg += f"  TP1:   `${r['tp1']:.2f}` ({tp1_pct:+.1f}%)\n"
+    msg += f"  TP2:   `${r['tp2']:.2f}` ({tp2_pct:+.1f}%)\n\n"
+
+    if r["status"] == "BELI":
+        msg += "✅ *Action:* Entry sekarang. Pasang SL ketat. Risk 1-2% modal."
+    elif r["status"] == "WATCH":
+        msg += "⏸ *Action:* Trend uptrend, tapi entry kurang ideal. Tunggu pullback ke EMA20."
+    elif r["status"] == "JUAL":
+        msg += "🚨 *Action:* Exit posisi yang ada. Hindari entry baru."
+    else:
+        msg += "⏸ *Action:* Netral. Hold posisi yang ada / tunggu setup berikutnya."
+
+    msg += "\n\n_Hold target: 1-2 minggu | R:R 1:2 di TP2_"
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Aktifkan auto-notif harian jam 07:00 WIB."""
+    chat_id = update.effective_chat.id
+    if chat_id in SUBSCRIBED:
+        await update.message.reply_text(
+            "✅ Anda sudah berlangganan auto-notif.\n\n"
+            "Setiap pagi jam *07:00 WIB* bot akan kirim rekomendasi Pocket otomatis.\n\n"
+            "Untuk berhenti: /unsubscribe",
+            parse_mode="Markdown"
+        )
+        return
+
+    SUBSCRIBED.add(chat_id)
+    save_subscribers()
+    await update.message.reply_text(
+        "🔔 *BERLANGGANAN AKTIF!*\n\n"
+        "Setiap pagi jam *07:00 WIB* bot otomatis kirim:\n"
+        "- Top 7 saham untuk Pocket\n"
+        "- Alokasi % per saham\n"
+        "- Status sinyal harian\n\n"
+        "Cocok untuk re-balance Pocket Pluang sebelum US market buka (20:30 WIB).\n\n"
+        "Untuk berhenti: /unsubscribe",
+        parse_mode="Markdown"
+    )
+
+
+async def cmd_unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Matikan auto-notif harian."""
+    chat_id = update.effective_chat.id
+    if chat_id not in SUBSCRIBED:
+        await update.message.reply_text(
+            "❌ Anda belum berlangganan auto-notif.\n\nUntuk aktifkan: /subscribe"
+        )
+        return
+
+    SUBSCRIBED.discard(chat_id)
+    save_subscribers()
+    await update.message.reply_text(
+        "🔕 *Berhenti berlangganan.*\n\n"
+        "Tidak akan terima auto-notif harian lagi.\n"
+        "Untuk aktifkan lagi: /subscribe",
+        parse_mode="Markdown"
+    )
+
+
+async def daily_pocket_notif(context: ContextTypes.DEFAULT_TYPE):
+    """Auto-notif Pocket Recommender setiap pagi jam 07:00 WIB."""
+    if not SUBSCRIBED:
+        logger.info("No subscribers — skip daily notif")
+        return
+
+    logger.info(f"Sending daily notif to {len(SUBSCRIBED)} subscribers...")
+    results = await get_analysis()
+
+    candidates = [r for r in results
+                   if r["score"] >= 65 and r["trend"] == "UP" and r["tier"] in ("T1", "T2")]
+    candidates = candidates[:7]
+
+    if not candidates:
+        msg = (
+            "🌅 *NOTIFIKASI PAGI*\n"
+            f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+            "Belum cukup kandidat Pocket hari ini.\n"
+            "Tunggu sinyal berikutnya — cek /cek atau /watch untuk peluang."
+        )
+    else:
+        total_score = sum(r["score"] for r in candidates)
+        msg = "🌅 *NOTIFIKASI PAGI — POCKET HARI INI*\n"
+        msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
+        msg += "```\n"
+        msg += f"{'#':>2} {'TKR':5} {'SKR':>3} {'ALOKASI':>8}\n"
+        msg += "-" * 24 + "\n"
+        for i, r in enumerate(candidates, 1):
+            alloc = r["score"] / total_score * 100
+            msg += f"{i:>2} {r['ticker']:5} {r['score']:>3} {alloc:>7.1f}%\n"
+        msg += "```\n"
+        msg += "\n💼 Re-balance Pocket Pluang Anda sebelum US market buka (20:30 WIB).\n"
+        msg += "\n_Chat /beli untuk detail SL/TP, /unsubscribe untuk berhenti notif._"
+
+    failed = []
+    for chat_id in list(SUBSCRIBED):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"Failed to send to {chat_id}: {e}")
+            failed.append(chat_id)
+
+    # Clean up dead subscribers
+    for chat_id in failed:
+        SUBSCRIBED.discard(chat_id)
+    if failed:
+        save_subscribers()
+
+
 def main():
     if BOT_TOKEN == "PASTE_TOKEN_HERE":
         print("ERROR: Set BOT_TOKEN environment variable atau edit langsung di bot.py")
         return
 
+    load_subscribers()
+    logger.info(f"Loaded {len(SUBSCRIBED)} subscribers from file")
+
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(CommandHandler("cek",    cmd_cek))
-    app.add_handler(CommandHandler("beli",   cmd_beli))
-    app.add_handler(CommandHandler("watch",  cmd_watch))
-    app.add_handler(CommandHandler("jual",   cmd_jual))
-    app.add_handler(CommandHandler("pocket", cmd_pocket))
+    app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("help",        cmd_help))
+    app.add_handler(CommandHandler("cek",         cmd_cek))
+    app.add_handler(CommandHandler("beli",        cmd_beli))
+    app.add_handler(CommandHandler("watch",       cmd_watch))
+    app.add_handler(CommandHandler("jual",        cmd_jual))
+    app.add_handler(CommandHandler("pocket",      cmd_pocket))
+    app.add_handler(CommandHandler("saham",       cmd_saham))
+    app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
+    app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+
+    # Schedule daily Pocket notif at 07:00 WIB
+    job_queue = app.job_queue
+    if job_queue is not None:
+        job_queue.run_daily(
+            daily_pocket_notif,
+            time=dt_time(hour=7, minute=0, tzinfo=WIB),
+            name="daily_pocket"
+        )
+        logger.info("Scheduled daily Pocket notif at 07:00 WIB")
+    else:
+        logger.warning("JobQueue not available — daily notif disabled")
 
     logger.info("Bot started. Press Ctrl+C to stop.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
