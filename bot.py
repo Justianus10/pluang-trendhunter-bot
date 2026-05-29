@@ -478,6 +478,8 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
     extended_up   = r["chg_10d"] >= 15
     extended_down = r["chg_10d"] <= -15
 
+    tech_neutral = r["status"] == "HOLD"
+
     msg += "🎯 *Confluence Check:*\n"
     if tech_bullish and sent_bullish:
         msg += "  ✅ Teknikal + Sentiment **ALIGN BULLISH** → confidence TINGGI\n"
@@ -487,6 +489,10 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += "  ⚠️ Teknikal bullish tapi Sentiment bearish → **HATI-HATI**, mungkin trap\n"
     elif tech_bearish and sent_bullish:
         msg += "  ⚠️ Teknikal bearish tapi Sentiment bullish → **CAMPUR**, skip atau cek manual\n"
+    elif tech_neutral and sent_bullish:
+        msg += f"  💡 Teknikal HOLD tapi Sentiment **BULLISH** ({sentiment['score']:+.2f}) → **watch breakout**\n"
+    elif tech_neutral and sent_bearish:
+        msg += f"  💡 Teknikal HOLD tapi Sentiment **BEARISH** ({sentiment['score']:+.2f}) → **watch breakdown**\n"
     elif not sent_available:
         msg += "  ⚪ Sentiment tidak tersedia — pakai teknikal saja\n"
     else:
@@ -556,11 +562,25 @@ async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:  # HOLD
         if sent_strong_bull:
-            msg += ("👀 *Action:* HOLD teknikal tapi sentiment SANGAT BULLISH — "
-                    "watch ketat, mungkin breakout sebentar lagi.")
+            msg += ("👀 *Action:* HOLD teknikal tapi sentiment **SANGAT BULLISH** — "
+                    "watch ketat, mungkin breakout sebentar lagi. Set price alert di resistance.")
+        elif sent_bullish and extended_down:
+            msg += (f"⚡ *Action:* HOLD + sentiment BULLISH ({sentiment['score']:+.2f}) + "
+                    f"sudah drop {r['chg_10d']:.1f}% → **VALUE/CONTRARIAN SETUP**. "
+                    "Watch RSI cross up + bullish candle baru entry kecil.")
+        elif sent_bullish:
+            msg += (f"💡 *Action:* HOLD tapi sentiment BULLISH ({sentiment['score']:+.2f}) — "
+                    "setup berkembang. Watch breakout di resistance dekat. "
+                    "Belum entry, tapi siap-siap.")
         elif sent_strong_bear:
-            msg += ("👀 *Action:* HOLD teknikal tapi sentiment SANGAT BEARISH — "
+            msg += ("👀 *Action:* HOLD teknikal tapi sentiment **SANGAT BEARISH** — "
                     "kalau punya posisi, siap-siap reduce.")
+        elif sent_bearish:
+            msg += (f"⚠️ *Action:* HOLD + sentiment bearish ({sentiment['score']:+.2f}) — "
+                    "tekanan jual mulai muncul. Hindari entry, hold posisi jangan tambah.")
+        elif extended_down:
+            msg += (f"⚠️ *Action:* HOLD + sudah drop {r['chg_10d']:.1f}% — "
+                    "falling knife risk. Tunggu stabilisasi sebelum entry.")
         else:
             msg += "⏸ *Action:* Netral. Hold posisi yang ada / tunggu setup berikutnya."
 
