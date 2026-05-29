@@ -318,7 +318,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌍 *GLOBAL TOP 10 — best picks dari 234 saham US:*\n"
         "/global — ranking 10 saham global pilihan\n"
         "/global\\_beli — rekomendasi BELI dari global\n"
-        "/global\\_pocket — alokasi Pocket dari global\n\n"
+        "/global\\_top5 — TOP 5 BEST EXECUTION (filtered + diversified) ⭐\n"
+        "/global\\_pocket — alokasi Pocket 10 saham\n\n"
         "🔍 *Saham spesifik (30 saham):*\n"
         "/saham NVDA — analisa detail (teknikal + sentiment)\n"
         "/news NVDA — berita 24 jam + skor sentiment\n\n"
@@ -499,6 +500,89 @@ async def cmd_global_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     msg += "_Hold 1-2 minggu | Semua available di Pluang_"
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def cmd_global_top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Top 5 dari Global 10 — filter extended move + sektor diversifikasi."""
+    await update.message.reply_text("⏳ Memilih top 5 best execution picks...")
+    try:
+        results = await get_analysis_global()
+        if not results:
+            await update.message.reply_text("❌ Gagal fetch data. Coba lagi.")
+            return
+
+        # Filter: skip extended move (>13% 10D) untuk hindari chasing
+        clean = [r for r in results if r.get("chg_10d", 0) < 13]
+        # Sort by score desc
+        clean.sort(key=lambda r: r.get("score", 0), reverse=True)
+
+        # Diversifikasi: max 3 Semi (GS), sisanya Div (GD)
+        top5 = []
+        semi_count = 0
+        div_count = 0
+        for r in clean:
+            if r["tier"] == "GS" and semi_count < 3:
+                top5.append(r)
+                semi_count += 1
+            elif r["tier"] == "GD" and div_count < 3:
+                top5.append(r)
+                div_count += 1
+            if len(top5) == 5:
+                break
+
+        # Fallback kalau tidak cukup diversifikasi
+        if len(top5) < 5:
+            for r in clean:
+                if r not in top5:
+                    top5.append(r)
+                if len(top5) == 5:
+                    break
+
+        # Alokasi dinamis: weighted by score, dengan max 25% min 15%
+        total_score = sum(r["score"] for r in top5)
+        allocations = []
+        for r in top5:
+            base = r["score"] / total_score * 100
+            base = max(15, min(25, base))  # clamp 15-25%
+            allocations.append(base)
+        # Normalize to exactly 100%
+        total = sum(allocations)
+        allocations = [a / total * 100 for a in allocations]
+
+        msg = "🎯 TOP 5 BEST EXECUTION PICKS\n"
+        msg += now_wib().strftime("%Y-%m-%d %H:%M WIB") + "\n"
+        msg += "Filter: skip extended (>13% 10D) + diversifikasi sektor\n\n"
+
+        emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+        for i, (r, alloc) in enumerate(zip(top5, allocations), 1):
+            sec = "Semi" if r["tier"] == "GS" else "Div"
+            stat = r.get("status", "?")
+            em = emoji.get(stat, "⚪")
+            sl_pct  = (r["sl"]  / r["price"] - 1) * 100
+            tp1_pct = (r["tp1"] / r["price"] - 1) * 100
+            tp2_pct = (r["tp2"] / r["price"] - 1) * 100
+
+            msg += f"#{i} {r['ticker']} [{sec}] {em}{stat}\n"
+            msg += f"   Skor: {r['score']}/100 | RSI: {r.get('rsi', 0):.0f} | 10D: {r['chg_10d']:+.1f}%\n"
+            msg += f"   💼 ALOKASI: {alloc:.0f}%\n"
+            msg += f"   Entry: ${r['price']:.2f}\n"
+            msg += f"   SL:    ${r['sl']:.2f} ({sl_pct:+.1f}%)\n"
+            msg += f"   TP1:   ${r['tp1']:.2f} ({tp1_pct:+.1f}%)\n"
+            msg += f"   TP2:   ${r['tp2']:.2f} ({tp2_pct:+.1f}%)\n\n"
+
+        msg += "═══ TOTAL ALOKASI: 100% ═══\n\n"
+        msg += "📋 CARA EKSEKUSI di PLUANG:\n"
+        msg += "1. Buka Pluang → Pocket → + Buat Pocket\n"
+        msg += "2. Nama: 'Trend Hunter Top 5'\n"
+        msg += "3. Add 5 saham dengan alokasi di atas\n"
+        msg += "4. Set modal (saran Rp 3-10jt awal)\n"
+        msg += "5. Set TradingView alert SL untuk masing-masing\n"
+        msg += "6. Tunggu US market buka 20:30 WIB\n\n"
+        msg += "Hold target: 1-2 minggu | R:R 1:2 di TP2"
+        await update.message.reply_text(msg)
+    except Exception as e:
+        logger.exception("cmd_global_top5 error")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def cmd_global_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -894,8 +978,9 @@ def main():
     app.add_handler(CommandHandler("watch",       cmd_watch))
     app.add_handler(CommandHandler("jual",        cmd_jual))
     app.add_handler(CommandHandler("pocket",      cmd_pocket))
-    app.add_handler(CommandHandler("global",      cmd_global))
-    app.add_handler(CommandHandler("global_beli", cmd_global_beli))
+    app.add_handler(CommandHandler("global",       cmd_global))
+    app.add_handler(CommandHandler("global_beli",  cmd_global_beli))
+    app.add_handler(CommandHandler("global_top5",  cmd_global_top5))
     app.add_handler(CommandHandler("global_pocket", cmd_global_pocket))
     app.add_handler(CommandHandler("saham",       cmd_saham))
     app.add_handler(CommandHandler("news",        cmd_news))
