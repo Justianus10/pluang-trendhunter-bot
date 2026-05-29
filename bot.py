@@ -478,28 +478,34 @@ async def cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_global_beli(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Rekomendasi BELI dari 10 saham Global."""
     await update.message.reply_text("⏳ Cari rekomendasi BELI dari Global Top...")
-    results = await get_analysis_global()
-    buy = [r for r in results if r["status"] in ("BELI", "WATCH")]
-    if not buy:
-        await update.message.reply_text(
-            "🌍 *GLOBAL BELI*\n\nTidak ada sinyal BELI/WATCH hari ini.",
-            parse_mode="Markdown"
-        )
-        return
+    try:
+        results = await get_analysis_global()
+        buy = [r for r in results if r["status"] in ("BELI", "WATCH")]
+        if not buy:
+            await update.message.reply_text("🌍 GLOBAL BELI\n\nTidak ada sinyal BELI/WATCH hari ini.")
+            return
 
-    msg = f"🌍 *GLOBAL TOP — REKOMENDASI BELI*\n_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-    for i, r in enumerate(buy[:8], 1):
-        sec = "Semi" if r["tier"] == "GS" else "Diversifikasi"
-        msg += (
-            f"*{i}. {r['ticker']}* ({sec}) — Skor {r['score']} ⭐ {r['status']}\n"
-            f"   Entry: `${r['price']:.2f}`\n"
-            f"   SL:    `${r['sl']:.2f}` (-{(1-r['sl']/r['price'])*100:.1f}%)\n"
-            f"   TP1:   `${r['tp1']:.2f}` (+{(r['tp1']/r['price']-1)*100:.1f}%)\n"
-            f"   TP2:   `${r['tp2']:.2f}` (+{(r['tp2']/r['price']-1)*100:.1f}%)\n"
-            f"   RSI: {r['rsi']:.0f} | 10D: {r['chg_10d']:+.1f}%\n\n"
-        )
-    msg += "_Hold 1-2 minggu | Semua available di Pluang_"
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        emoji = {"BELI": "🟢", "WATCH": "🟡"}
+        msg = "🌍 GLOBAL TOP — REKOMENDASI BELI\n"
+        msg += now_wib().strftime("%Y-%m-%d %H:%M WIB") + "\n\n"
+        for i, r in enumerate(buy[:8], 1):
+            sec = "Semi" if r["tier"] == "GS" else "Diversifikasi"
+            stat = r.get("status", "?")
+            em = emoji.get(stat, "⚪")
+            msg += (
+                f"#{i} {r['ticker']} [{sec}] {em}{stat} - Skor {r['score']}\n"
+                f"   Entry: ${r['price']:.2f}\n"
+                f"   SL:    ${r['sl']:.2f} (-{(1-r['sl']/r['price'])*100:.1f}%)\n"
+                f"   TP1:   ${r['tp1']:.2f} (+{(r['tp1']/r['price']-1)*100:.1f}%)\n"
+                f"   TP2:   ${r['tp2']:.2f} (+{(r['tp2']/r['price']-1)*100:.1f}%)\n"
+                f"   RSI: {r['rsi']:.0f} | 10D: {r['chg_10d']:+.1f}%\n\n"
+            )
+        msg += "Hold 1-2 minggu | Semua available di Pluang\n"
+        msg += "TIP: Chat /global_top5 untuk versi simplified."
+        await update.message.reply_text(msg)
+    except Exception as e:
+        logger.exception("cmd_global_beli error")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def cmd_global_top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,42 +594,45 @@ async def cmd_global_top5(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_global_pocket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Alokasi Pocket dari 10 saham Global Top dengan weighting Semi-Heavy."""
     await update.message.reply_text("⏳ Generate Global Pocket allocation...")
-    results = await get_analysis_global()
+    try:
+        results = await get_analysis_global()
+        if not results:
+            await update.message.reply_text("❌ Gagal fetch data. Coba lagi.")
+            return
 
-    # Fixed allocation berdasarkan ranking awal — semi-heavy strategy
-    # User bisa adjust di Pluang sesuai preferensi
-    FIXED_ALLOCATION = {
-        "KLAC": 15, "AMAT": 12, "ASML": 12, "LRCX": 10,
-        "QCOM": 6,  "MU":   5,
-        "TGT":  12, "SPG":  10, "MS":   10, "NUE":  8,
-    }
+        FIXED_ALLOCATION = {
+            "KLAC": 15, "AMAT": 12, "ASML": 12, "LRCX": 10,
+            "QCOM": 6,  "MU":   5,
+            "TGT":  12, "SPG":  10, "MS":   10, "NUE":  8,
+        }
 
-    msg = f"💼 *GLOBAL POCKET — SEMI HEAVY (1-2 minggu)*\n"
-    msg += f"_{now_wib().strftime('%Y-%m-%d %H:%M WIB')}_\n\n"
-    msg += "```\n"
-    msg += f"{'#':>2} {'TKR':5} {'SEK':4} {'ALOC':>5} {'STAT':5}\n"
-    msg += "-" * 28 + "\n"
+        emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
+        msg = "💼 GLOBAL POCKET — SEMI HEAVY (10 saham, 1-2 minggu)\n"
+        msg += now_wib().strftime("%Y-%m-%d %H:%M WIB") + "\n\n"
 
-    # Sort by allocation desc
-    sorted_results = sorted(results, key=lambda r: FIXED_ALLOCATION.get(r["ticker"], 0), reverse=True)
+        sorted_results = sorted(results, key=lambda r: FIXED_ALLOCATION.get(r["ticker"], 0), reverse=True)
+        for i, r in enumerate(sorted_results, 1):
+            alloc = FIXED_ALLOCATION.get(r["ticker"], 0)
+            sec = "Semi" if r["tier"] == "GS" else "Div"
+            stat = r.get("status", "?")
+            em = emoji.get(stat, "⚪")
+            msg += f"{i:>2}. {r['ticker']:5} [{sec}] {alloc:>2}% {em}{stat}\n"
 
-    for i, r in enumerate(sorted_results, 1):
-        alloc = FIXED_ALLOCATION.get(r["ticker"], 0)
-        sec = "Semi" if r["tier"] == "GS" else "Div"
-        msg += f"{i:>2} {r['ticker']:5} {sec:4} {alloc:>4}% {r['status']:5}\n"
-    msg += "```\n"
-    msg += "\n📊 *Komposisi:*\n"
-    msg += "  • 60% Semiconductor (AI boom narrative)\n"
-    msg += "  • 40% Diversifikasi (Retail/REIT/Finance/Materials)\n\n"
-    msg += "*Cara pakai di Pluang:*\n"
-    msg += "1. Pluang → Pocket → + Buat Pocket\n"
-    msg += "2. Nama: 'Trend Hunter Global'\n"
-    msg += "3. Pilih 10 saham di atas dengan alokasi %\n"
-    msg += "4. Set modal Pocket (saran: Rp 3-10jt awal)\n"
-    msg += "5. Re-balance tiap Senin pagi\n\n"
-    msg += "_⚠️ Set TradingView price alert di SL untuk tiap saham — Pluang tidak auto-SL._"
-
-    await update.message.reply_text(msg, parse_mode="Markdown")
+        msg += "\n📊 Komposisi:\n"
+        msg += "  • 60% Semiconductor (AI boom)\n"
+        msg += "  • 40% Diversifikasi (Retail/REIT/Finance/Materials)\n\n"
+        msg += "📋 Cara pakai di Pluang:\n"
+        msg += "1. Pluang → Pocket → + Buat Pocket\n"
+        msg += "2. Nama: 'Trend Hunter Global'\n"
+        msg += "3. Add 10 saham dengan alokasi di atas\n"
+        msg += "4. Set modal (saran: Rp 3-10jt awal)\n"
+        msg += "5. Re-balance tiap Senin pagi\n\n"
+        msg += "⚠️ Set TradingView alert SL — Pluang tidak auto-SL.\n\n"
+        msg += "TIP: Chat /global_top5 untuk versi simplified (5 saham terbaik)."
+        await update.message.reply_text(msg)
+    except Exception as e:
+        logger.exception("cmd_global_pocket error")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def cmd_saham(update: Update, context: ContextTypes.DEFAULT_TYPE):
