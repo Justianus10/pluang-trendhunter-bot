@@ -454,22 +454,21 @@ async def cmd_global(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         emoji = {"BELI": "🟢", "WATCH": "🟡", "HOLD": "⚪", "JUAL": "🔴"}
-        msg = f"🌍 GLOBAL TOP 10 — BEST PICKS\n{now_wib().strftime('%Y-%m-%d %H:%M WIB')}\n\n"
-        msg += "```\n"
-        msg += f"{'#':>2} {'TKR':5} {'SEK':4} {'SKR':>3} {'STATUS':6} {'10D':>6}\n"
-        msg += "-" * 34 + "\n"
+        # PLAIN TEXT (no parse_mode) — paling aman, tidak ada masalah escape
+        msg = "🌍 GLOBAL TOP 10 — BEST PICKS\n"
+        msg += now_wib().strftime("%Y-%m-%d %H:%M WIB") + "\n\n"
         for i, r in enumerate(results, 1):
             sec = "Semi" if r["tier"] == "GS" else "Div"
             stat = r.get("status", "?")
             score = r.get("score", 0)
             chg = r.get("chg_10d", 0)
             em = emoji.get(stat, "⚪")
-            msg += f"{i:>2} {r['ticker']:5} {sec:4} {score:>3} {em}{stat:5} {chg:>+5.1f}%\n"
-        msg += "```\n\n"
-        msg += "GS = Global Semiconductor | GD = Global Diversified\n"
+            msg += f"{i:>2}. {r['ticker']:5} [{sec}] Skor {score} {em}{stat}  10D: {chg:+.1f}%\n"
+        msg += "\nGS = Semiconductor | GD = Diversified\n"
         msg += "Semua available di Pluang.\n"
+        msg += "Chat /global_beli untuk detail Entry/SL/TP.\n"
         msg += "Chat /global_pocket untuk alokasi Pocket."
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(msg)
     except Exception as e:
         logger.exception("cmd_global error")
         await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
