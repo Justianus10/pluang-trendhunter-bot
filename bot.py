@@ -29,8 +29,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 # Sentiment analyzer (singleton)
 _sentiment_analyzer = SentimentIntensityAnalyzer()
@@ -303,6 +303,49 @@ async def get_analysis_global():
     return results
 
 
+# ===== KEYBOARD MENU =====
+
+def main_menu():
+    """Reply keyboard dengan tombol-tombol command. Tap = kirim command."""
+    keyboard = [
+        ["⭐ Top 5 Picks", "🌍 Global 10"],
+        ["💰 Global BELI", "💼 Global Pocket"],
+        ["📊 Pluang Ranking", "💼 Pluang Pocket"],
+        ["🟢 BELI", "🟡 WATCH", "🔴 JUAL"],
+        ["🔔 Subscribe", "🔕 Unsubscribe"],
+        ["ℹ️ Help"],
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
+        one_time_keyboard=False,
+        input_field_placeholder="Tap menu atau ketik /saham TICKER..."
+    )
+
+
+# Mapping button text → command function
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle tap dari button menu — mapping ke command yang sesuai."""
+    text = update.message.text
+    button_map = {
+        "⭐ Top 5 Picks":     cmd_global_top5,
+        "🌍 Global 10":       cmd_global,
+        "💰 Global BELI":     cmd_global_beli,
+        "💼 Global Pocket":   cmd_global_pocket,
+        "📊 Pluang Ranking":  cmd_cek,
+        "💼 Pluang Pocket":   cmd_pocket,
+        "🟢 BELI":            cmd_beli,
+        "🟡 WATCH":           cmd_watch,
+        "🔴 JUAL":            cmd_jual,
+        "🔔 Subscribe":       cmd_subscribe,
+        "🔕 Unsubscribe":     cmd_unsubscribe,
+        "ℹ️ Help":            cmd_help,
+    }
+    handler = button_map.get(text)
+    if handler:
+        await handler(update, context)
+
+
 # ===== TELEGRAM HANDLERS =====
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -327,9 +370,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/subscribe — notif /pocket otomatis jam 19:00 WIB\n"
         "/unsubscribe — matikan notif\n\n"
         "/help — bantuan\n\n"
+        "💡 TIPS: Tap menu di bawah supaya tidak perlu ketik!\n\n"
         "_Data refresh setiap 15 menit. Sumber: Yahoo Finance._"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=main_menu())
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -995,6 +1039,9 @@ def main():
     app.add_handler(CommandHandler("news",        cmd_news))
     app.add_handler(CommandHandler("subscribe",   cmd_subscribe))
     app.add_handler(CommandHandler("unsubscribe", cmd_unsubscribe))
+
+    # Handler untuk button taps (text messages dari Reply Keyboard)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, button_handler))
 
     # Schedule daily Pocket notif at 19:00 WIB (1.5 jam sebelum US market buka)
     job_queue = app.job_queue
