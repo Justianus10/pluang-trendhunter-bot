@@ -256,45 +256,50 @@ def analyze_ticker(symbol: str, tier: str):
         return None
 
 
+async def _fetch_parallel(tickers_list, label="batch"):
+    """Fetch semua saham secara paralel — 5-10x lebih cepat dari sequential."""
+    loop = asyncio.get_event_loop()
+    tasks = [loop.run_in_executor(None, analyze_ticker, sym, tier) for sym, tier in tickers_list]
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    results = []
+    for r in raw:
+        if isinstance(r, Exception):
+            logger.error(f"Fetch error in {label}: {r}")
+            continue
+        if r is not None:
+            results.append(r)
+    return results
+
+
 async def get_analysis():
-    """Cached analysis — refresh setiap 15 menit."""
+    """Cached analysis 20 saham Pluang basket — refresh setiap 15 menit, paralel."""
     now = datetime.now(WIB)
     if (_cache["data"] is not None and _cache["timestamp"] is not None and
         (now - _cache["timestamp"]).total_seconds() < CACHE_MINUTES * 60):
         return _cache["data"]
 
-    logger.info("Fetching fresh analysis for 20 stocks...")
-    loop = asyncio.get_event_loop()
-    results = []
-    for sym, tier in TICKERS:
-        r = await loop.run_in_executor(None, analyze_ticker, sym, tier)
-        if r:
-            results.append(r)
-
+    logger.info("Fetching fresh analysis for 20 stocks (parallel)...")
+    results = await _fetch_parallel(TICKERS, label="basket")
     results.sort(key=lambda x: x["score"], reverse=True)
     _cache["data"] = results
     _cache["timestamp"] = now
+    logger.info(f"Got {len(results)} results, cached.")
     return results
 
 
 async def get_analysis_global():
-    """Cached analysis untuk universe Global Top 10."""
+    """Cached analysis untuk universe Global Top 10 — paralel."""
     now = datetime.now(WIB)
     if (_cache_global["data"] is not None and _cache_global["timestamp"] is not None and
         (now - _cache_global["timestamp"]).total_seconds() < CACHE_MINUTES * 60):
         return _cache_global["data"]
 
-    logger.info("Fetching fresh global analysis...")
-    loop = asyncio.get_event_loop()
-    results = []
-    for sym, tier in TICKERS_GLOBAL:
-        r = await loop.run_in_executor(None, analyze_ticker, sym, tier)
-        if r:
-            results.append(r)
-
+    logger.info("Fetching fresh global analysis (parallel)...")
+    results = await _fetch_parallel(TICKERS_GLOBAL, label="global")
     results.sort(key=lambda x: x["score"], reverse=True)
     _cache_global["data"] = results
     _cache_global["timestamp"] = now
+    logger.info(f"Got {len(results)} global results, cached.")
     return results
 
 
